@@ -1,0 +1,16 @@
+[package]
+name = "fdb"
+version = "0.1.0"
+edition = "2024"
+description = "Command-line frontend for the fdb debugger."
+
+[[bin]]
+name = "fdb"
+path = "src/main.rs"
+
+[dependencies]
+libfdb = { path = "../libfdb" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

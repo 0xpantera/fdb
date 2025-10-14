@@ -1,0 +1,9 @@
+# Ignore Cargo build artifacts and editor noise
+target/
+**/*.rs.bk
+Cargo.lock
+.idea/
+.vscode/
+AGENTS.md
+*.pdf
+Issues.md

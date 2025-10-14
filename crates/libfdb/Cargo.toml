@@ -1,0 +1,17 @@
+[package]
+name = "libfdb"
+version = "0.1.0"
+edition = "2024"
+description = "Core library for the fdb debugger."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+nix = { workspace = true }
+object = { workspace = true }
+gimli = { workspace = true }
+addr2line = { workspace = true }
+log = { workspace = true }

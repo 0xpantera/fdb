@@ -2,16 +2,10 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use libfdb::process::ProcessHandle;
+use libfdb::{ProcessState, process::ProcessHandle};
 use log::info;
-use nix::{
-    sys::{
-        ptrace,
-        wait::{self, WaitPidFlag, WaitStatus},
-    },
-    unistd::Pid,
-};
 use rustyline::{Editor, error::ReadlineError, history::DefaultHistory};
+use std::ffi::CString;
 
 /// Top-level argument parser describing the debugger interface.
 #[derive(Parser, Debug)]
@@ -41,12 +35,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Command::Run { prog, args } => {
-            let process = run_program(&prog, &args)?;
-            run_interactive_session(process)?;
+            let mut process = run_program(&prog, &args)?;
+            run_interactive_session(&mut process)?;
         }
         Command::Attach { pid } => {
-            let process = attach_to_process(pid)?;
-            run_interactive_session(process)?;
+            let mut process = attach_to_process(pid)?;
+            run_interactive_session(&mut process)?;
         }
         Command::Version => {
             println!("fdb {}", libfdb::version());
@@ -57,9 +51,15 @@ fn main() -> Result<()> {
 
 fn run_program(prog: &str, args: &[String]) -> Result<ProcessHandle> {
     info!("Launching {prog} with args {args:?}");
-    let handle = ProcessHandle::launch(prog, args)
-        .with_context(|| format!("Failed to launch program '{}'", prog))?;
-    Ok(handle)
+    let c_prog = CString::new(prog)?;
+    let mut tmp = Vec::with_capacity(args.len() + 1);
+    tmp.push(c_prog.clone()); // argv[0]
+    for a in args {
+        tmp.push(CString::new(a.as_str())?);
+    }
+    let argv: Vec<&std::ffi::CStr> = tmp.iter().map(|s| s.as_c_str()).collect();
+
+    Ok(ProcessHandle::launch(c_prog.as_c_str(), &argv)?)
 }
 
 fn attach_to_process(pid: i32) -> Result<ProcessHandle> {
@@ -69,7 +69,7 @@ fn attach_to_process(pid: i32) -> Result<ProcessHandle> {
     Ok(handle)
 }
 
-fn run_interactive_session(process: ProcessHandle) -> Result<()> {
+fn run_interactive_session(process: &mut ProcessHandle) -> Result<()> {
     println!(
         "Attached to process {} - entering interactive mode",
         process.pid()
@@ -107,7 +107,7 @@ fn run_interactive_session(process: ProcessHandle) -> Result<()> {
                 };
 
                 // Handle command; exit handled in loop after call
-                if let Err(e) = handle_command(&process, to_run) {
+                if let Err(e) = handle_command(process, to_run) {
                     eprintln!("Error: {e}");
                 }
 
@@ -141,7 +141,7 @@ fn run_interactive_session(process: ProcessHandle) -> Result<()> {
     Ok(())
 }
 
-fn handle_command(process: &ProcessHandle, line: &str) -> Result<()> {
+fn handle_command(process: &mut ProcessHandle, line: &str) -> Result<()> {
     let args = split_whitespace(line);
     if args.is_empty() {
         return Ok(());
@@ -150,11 +150,24 @@ fn handle_command(process: &ProcessHandle, line: &str) -> Result<()> {
     let cmd = args[0];
 
     // Accept "c", "cont", "continue" (prefix match on "continue")
+    // Accept "c", "cont", "continue"
     if is_prefix(cmd, "continue") {
-        let pid = process.pid();
-        resume(pid)?;
-        // after continue immediately wait for the next stop.
-        wait_on_signal(pid)?;
+        process.resume()?; // lib method (PTRACE_CONT)
+        match process.wait_on_signal()? {
+            // lib method (single waitpid) + state update
+            ProcessState::Stopped(reason) => {
+                println!("stopped by signal: {:?}", reason.signal);
+            }
+            ProcessState::Exited(code) => {
+                println!("process exited with code {code}");
+            }
+            ProcessState::Terminated(sig) => {
+                println!("process terminated by signal: {:?}", sig);
+            }
+            other => {
+                println!("status: {:?}", other);
+            }
+        }
         return Ok(());
     }
 
@@ -168,6 +181,7 @@ fn handle_command(process: &ProcessHandle, line: &str) -> Result<()> {
         }
         "info" => {
             println!("Process PID: {}", process.pid());
+            println!("State: {:?}", process.state());
         }
         "quit" | "exit" => {
             // handled by the outer loop
@@ -188,32 +202,4 @@ fn is_prefix<S: AsRef<str>>(s: S, of: S) -> bool {
     let s = s.as_ref();
     let of = of.as_ref();
     of.starts_with(s)
-}
-
-fn resume(pid: Pid) -> anyhow::Result<()> {
-    // ptrace(PTRACE_CONT, pid, nullptr, nullptr)
-    ptrace::cont(pid, None).map_err(|e| anyhow::anyhow!("Couldn't continue: {e}"))?;
-    Ok(())
-}
-
-fn wait_on_signal(pid: Pid) -> anyhow::Result<()> {
-    // waitpid(pid, &status, 0)
-    match wait::waitpid(pid, Some(WaitPidFlag::empty()))? {
-        WaitStatus::Stopped(_, sig) => {
-            // Tracee stopped on a signal (expected after CONT if a breakpoint/signal hits)
-            // You can print or log the signal here if you like.
-            log::debug!("stopped by signal: {sig}");
-        }
-        WaitStatus::Exited(_, code) => {
-            anyhow::bail!("process exited with code {code}");
-        }
-        WaitStatus::Signaled(_, sig, _core) => {
-            anyhow::bail!("process terminated by signal {sig}");
-        }
-        other => {
-            // Covers Continued/StillAlive/PtraceEvent/PtraceSyscall, etc.
-            log::debug!("waitpid: {:?}", other);
-        }
-    }
-    Ok(())
 }
